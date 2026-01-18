@@ -2,7 +2,13 @@
 
 ![Vibecraft Screenshot](public/og-image.png)
 
-3D visualization of Claude Code as an interactive workshop. Watch Claude move between workstations as it uses tools.
+Manage Claude Code in style!
+
+**New:**
+- **Spatial Audio** — Claude behind you? Claude on your left? No claublem!
+- **Animations** — What's Claude up to? Watch him! ◕ ‿ ◕
+
+Vibecraft uses your own local Claude Code instances — no files or prompts are shared.
 
 ![Three.js](https://img.shields.io/badge/Three.js-black?logo=threedotjs) ![TypeScript](https://img.shields.io/badge/TypeScript-blue?logo=typescript&logoColor=white) ![npm](https://img.shields.io/npm/v/vibecraft)
 
