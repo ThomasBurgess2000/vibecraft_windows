@@ -1412,11 +1412,45 @@ function addEvent(event: ClaudeEvent) {
   }
 
   // Update managed session status based on event
-  const managedSession = findManagedSession(event.sessionId)
+  let managedSession = findManagedSession(event.sessionId)
+
+  // Auto-create session if we receive events from an unknown Claude session
+  if (!managedSession && event.sessionId && event.sessionId !== 'unknown') {
+    sessionCounter++
+    const id = randomUUID()
+    // Extract a friendly name from the cwd or use session counter
+    const cwdName = event.cwd ? event.cwd.split(/[/\\]/).pop() : undefined
+    const name = cwdName || `Claude ${sessionCounter}`
+
+    managedSession = {
+      id,
+      name,
+      tmuxSession: `auto-${event.sessionId.slice(0, 8)}`, // Placeholder
+      status: 'idle',
+      createdAt: Date.now(),
+      lastActivity: Date.now(),
+      cwd: event.cwd || '',
+    }
+
+    managedSessions.set(id, managedSession)
+    linkClaudeSession(event.sessionId, id)
+    log(`Auto-created session from event: ${name} (${event.sessionId.slice(0, 8)})`)
+
+    // Track git status if we have a cwd
+    if (event.cwd) {
+      gitStatusManager.track(id, event.cwd)
+    }
+
+    broadcastSessions()
+    saveSessions()
+  }
+
   if (managedSession) {
     const prevStatus = managedSession.status
     managedSession.lastActivity = Date.now() // Use current time for accurate timeout tracking
-    managedSession.cwd = event.cwd
+    if (event.cwd) {
+      managedSession.cwd = event.cwd
+    }
 
     // Update status based on event type
     switch (event.type) {
