@@ -105,6 +105,137 @@ describe('ProcessSessionManager', () => {
   })
 })
 
+/**
+ * Server API Integration Tests
+ *
+ * These tests verify the HTTP API for session management works correctly.
+ * They require the server to be running on localhost:4003 (or VIBECRAFT_TEST_SERVER).
+ *
+ * Run with: VIBECRAFT_TEST_SERVER=http://localhost:4003 npm test
+ */
+describe('Server Session API (Windows)', () => {
+  const SERVER_URL = process.env.VIBECRAFT_TEST_SERVER || 'http://localhost:4003'
+
+  // Skip these tests if not on Windows or server not available
+  const runTest = IS_WINDOWS ? it : it.skip
+
+  runTest('POST /sessions should create a managed session', async () => {
+    try {
+      const response = await fetch(`${SERVER_URL}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'API Test Session',
+          cwd: process.cwd(),
+          flags: { skipPermissions: true },
+        }),
+      })
+
+      const data = await response.json()
+
+      // KEY ASSERTION: Session creation should succeed on Windows
+      expect(data.ok).toBe(true)
+      expect(data.session).toBeDefined()
+      expect(data.session.id).toBeTruthy()
+      expect(data.session.name).toBe('API Test Session')
+
+      // Clean up - delete the session
+      if (data.session?.id) {
+        await fetch(`${SERVER_URL}/sessions/${data.session.id}`, {
+          method: 'DELETE',
+        })
+      }
+    } catch (e) {
+      // Skip if server not running
+      if ((e as Error).message.includes('ECONNREFUSED') ||
+          (e as Error).message.includes('fetch failed')) {
+        console.log('Skipping: Server not running at', SERVER_URL)
+        return
+      }
+      throw e
+    }
+  }, 10000)
+
+  runTest('POST /sessions/:id/prompt should send to managed session (not save to file)', async () => {
+    let sessionId: string | null = null
+
+    try {
+      // Step 1: Create a session
+      const createResponse = await fetch(`${SERVER_URL}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Prompt Test Session',
+          cwd: process.cwd(),
+          flags: { skipPermissions: true },
+        }),
+      })
+
+      const createData = await createResponse.json()
+
+      // Verify session was created
+      expect(createData.ok).toBe(true)
+      expect(createData.session).toBeDefined()
+      sessionId = createData.session.id
+
+      // Wait for session to initialize
+      await new Promise(resolve => setTimeout(resolve, 2000))
+
+      // Step 2: Send a prompt to the session
+      const promptResponse = await fetch(`${SERVER_URL}/sessions/${sessionId}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: 'Hello from integration test' }),
+      })
+
+      const promptData = await promptResponse.json()
+
+      // KEY ASSERTIONS: Prompt should succeed, not be saved to file
+      expect(promptData.ok).toBe(true)
+      // Should NOT have 'saved' field (indicating it went to file instead of session)
+      expect(promptData.saved).toBeUndefined()
+      // Should NOT have an error
+      expect(promptData.error).toBeUndefined()
+
+    } catch (e) {
+      if ((e as Error).message.includes('ECONNREFUSED') ||
+          (e as Error).message.includes('fetch failed')) {
+        console.log('Skipping: Server not running at', SERVER_URL)
+        return
+      }
+      throw e
+    } finally {
+      // Clean up
+      if (sessionId) {
+        try {
+          await fetch(`${SERVER_URL}/sessions/${sessionId}`, {
+            method: 'DELETE',
+          })
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    }
+  }, 15000)
+
+  runTest('GET /sessions should return array of sessions', async () => {
+    try {
+      const response = await fetch(`${SERVER_URL}/sessions`)
+      const data = await response.json()
+
+      expect(data.ok).toBe(true)
+      expect(Array.isArray(data.sessions)).toBe(true)
+    } catch (e) {
+      if ((e as Error).message.includes('ECONNREFUSED') ||
+          (e as Error).message.includes('fetch failed')) {
+        console.log('Skipping: Server not running at', SERVER_URL)
+        return
+      }
+      throw e
+    }
+  }, 5000)
+})
+
 // Integration tests that require actual process spawning
 // These are skipped by default as they require Claude CLI
 describe.skip('ProcessSessionManager Integration', () => {

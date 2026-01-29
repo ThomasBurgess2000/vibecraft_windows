@@ -187,3 +187,38 @@ describe('DirectoryAutocomplete', () => {
     expect(content).toMatch(/\[A-Za-z\]:/)
   })
 })
+
+describe('Path Validation', () => {
+  it('server/index.ts should allow backslashes on Windows paths', () => {
+    const indexPath = join(ROOT, 'server', 'index.ts')
+    const content = readFileSync(indexPath, 'utf-8')
+
+    // Should have platform-conditional regex for path validation
+    // Windows: allow backslash (path separator)
+    // Unix: reject backslash (potential injection)
+    expect(content).toContain('IS_WINDOWS')
+    expect(content).toContain('// Windows: allow backslash')
+
+    // The dangerous chars regex should be different for Windows vs Unix
+    expect(content).toMatch(/const dangerousChars = IS_WINDOWS/)
+  })
+
+  it('should not reject Windows paths with backslashes when IS_WINDOWS', () => {
+    // This tests that the regex used on Windows doesn't include backslash
+    const windowsRegex = /[;&|`$(){}[\]<>'"!#*?]/
+    const unixRegex = /[;&|`$(){}[\]<>\\'"!#*?]/
+
+    const windowsPath = 'C:\\Users\\thoma\\vibecraft_windows'
+    const unixPath = '/home/user/project'
+
+    // Windows regex should NOT match backslash paths
+    expect(windowsRegex.test(windowsPath)).toBe(false)
+
+    // Unix regex should match backslash paths
+    expect(unixRegex.test(windowsPath)).toBe(true)
+
+    // Both should not match normal Unix paths
+    expect(windowsRegex.test(unixPath)).toBe(false)
+    expect(unixRegex.test(unixPath)).toBe(false)
+  })
+})

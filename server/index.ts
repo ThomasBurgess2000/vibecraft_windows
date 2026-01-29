@@ -166,7 +166,10 @@ function validateDirectoryPath(inputPath: string): string {
 
   // Reject paths with shell metacharacters that could enable injection
   // Even with execFile, tmux passes commands to a shell
-  const dangerousChars = /[;&|`$(){}[\]<>\\'"!#*?]/
+  // Note: On Windows, backslash is the path separator, so we allow it
+  const dangerousChars = IS_WINDOWS
+    ? /[;&|`$(){}[\]<>'"!#*?]/  // Windows: allow backslash
+    : /[;&|`$(){}[\]<>\\'"!#*?]/  // Unix: reject backslash too
   if (dangerousChars.test(resolved)) {
     throw new Error(`Directory path contains invalid characters: ${inputPath}`)
   }
