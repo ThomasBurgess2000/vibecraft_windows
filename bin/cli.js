@@ -29,11 +29,17 @@ import { homedir } from 'os'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 
+// Platform detection
+const IS_WINDOWS = process.platform === 'win32'
+
 // ============================================================================
 // Health Checks
 // ============================================================================
 
 function checkJq() {
+  // On Windows, PowerShell has native JSON parsing - jq not required
+  if (IS_WINDOWS) return true
+
   try {
     execSync('which jq', { stdio: 'ignore' })
     return true
@@ -43,8 +49,23 @@ function checkJq() {
 }
 
 function checkTmux() {
+  // On Windows, we use ProcessSessionManager instead of tmux
+  if (IS_WINDOWS) return true
+
   try {
     execSync('which tmux', { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function checkCurl() {
+  // On Windows, PowerShell has Invoke-RestMethod - curl not required
+  if (IS_WINDOWS) return true
+
+  try {
+    execSync('which curl', { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -84,13 +105,21 @@ function printHealthCheck() {
   let warnings = []
 
   if (!jqOk) {
-    warnings.push(`  [!] jq not found - hooks won't work without it
+    if (IS_WINDOWS) {
+      // Should not happen since we return true for Windows
+    } else {
+      warnings.push(`  [!] jq not found - hooks won't work without it
       Install: brew install jq (macOS) or apt install jq (Linux)`)
+    }
   }
 
   if (!tmuxOk) {
-    warnings.push(`  [!] tmux not found - session management won't work
+    if (IS_WINDOWS) {
+      // Windows uses ProcessSessionManager, tmux not needed
+    } else {
+      warnings.push(`  [!] tmux not found - session management won't work
       Install: brew install tmux (macOS) or apt install tmux (Linux)`)
+    }
   }
 
   if (!hooksResult.configured) {
@@ -142,7 +171,8 @@ GitHub:  https://github.com/nearcyan/vibecraft
 
 // Hook path command
 if (args.includes('--hook-path')) {
-  console.log(resolve(ROOT, 'hooks/vibecraft-hook.sh'))
+  const hookScript = IS_WINDOWS ? 'vibecraft-hook.ps1' : 'vibecraft-hook.sh'
+  console.log(resolve(ROOT, 'hooks', hookScript))
   process.exit(0)
 }
 
@@ -187,8 +217,9 @@ if (args[0] === 'setup') {
   // ==========================================================================
 
   const vibecraftHooksDir = join(homedir(), '.vibecraft', 'hooks')
-  const installedHookPath = join(vibecraftHooksDir, 'vibecraft-hook.sh')
-  const sourceHookPath = resolve(ROOT, 'hooks/vibecraft-hook.sh')
+  const hookScriptName = IS_WINDOWS ? 'vibecraft-hook.ps1' : 'vibecraft-hook.sh'
+  const installedHookPath = join(vibecraftHooksDir, hookScriptName)
+  const sourceHookPath = resolve(ROOT, 'hooks', hookScriptName)
 
   // Ensure hooks directory exists
   if (!existsSync(vibecraftHooksDir)) {
@@ -205,7 +236,10 @@ if (args[0] === 'setup') {
 
   try {
     copyFileSync(sourceHookPath, installedHookPath)
-    chmodSync(installedHookPath, 0o755) // Make executable
+    // On Unix, make executable; on Windows, no chmod needed
+    if (!IS_WINDOWS) {
+      chmodSync(installedHookPath, 0o755)
+    }
     console.log(`Installed hook: ${installedHookPath}`)
   } catch (e) {
     console.error(`ERROR: Failed to install hook script: ${e.message}`)
@@ -249,12 +283,17 @@ if (args[0] === 'setup') {
   }
 
   // Hook configurations - use installed path (stable location)
+  // On Windows, wrap with PowerShell execution
+  const hookCommand = IS_WINDOWS
+    ? `powershell.exe -ExecutionPolicy Bypass -File "${installedHookPath}"`
+    : installedHookPath
+
   const toolHookEntry = {
     matcher: '*',
-    hooks: [{ type: 'command', command: installedHookPath, timeout: 5 }]
+    hooks: [{ type: 'command', command: hookCommand, timeout: 5 }]
   }
   const genericHookEntry = {
-    hooks: [{ type: 'command', command: installedHookPath, timeout: 5 }]
+    hooks: [{ type: 'command', command: hookCommand, timeout: 5 }]
   }
 
   // Initialize hooks object
@@ -324,13 +363,20 @@ if (args[0] === 'setup') {
   }
 
   if (!hasWarnings) {
+    if (IS_WINDOWS) {
+      console.log('\nWindows detected - using PowerShell for hooks, ProcessSessionManager for sessions.')
+    }
     console.log('\nAll dependencies found!')
   }
 
   // Check if server is already running (likely an update)
   let serverRunning = false
   try {
-    const res = execSync('curl -s http://localhost:4003/health', { timeout: 2000 })
+    // Use PowerShell on Windows to check server health
+    const healthCmd = IS_WINDOWS
+      ? 'powershell -Command "(Invoke-WebRequest -Uri http://localhost:4003/health -UseBasicParsing -TimeoutSec 2).Content"'
+      : 'curl -s http://localhost:4003/health'
+    const res = execSync(healthCmd, { timeout: 3000 })
     if (res.toString().includes('"ok":true')) {
       serverRunning = true
     }
@@ -449,10 +495,16 @@ if (args[0] === 'uninstall') {
   // Step 3: Remove hook script (but keep data)
   // ==========================================================================
 
-  const hookScript = join(homedir(), '.vibecraft', 'hooks', 'vibecraft-hook.sh')
-  if (existsSync(hookScript)) {
-    rmSync(hookScript)
-    console.log(`Removed: ${hookScript}`)
+  // Remove both Windows and Unix hook scripts if they exist
+  const hookScripts = [
+    join(homedir(), '.vibecraft', 'hooks', 'vibecraft-hook.sh'),
+    join(homedir(), '.vibecraft', 'hooks', 'vibecraft-hook.ps1'),
+  ]
+  for (const hookScript of hookScripts) {
+    if (existsSync(hookScript)) {
+      rmSync(hookScript)
+      console.log(`Removed: ${hookScript}`)
+    }
   }
 
   // Remove hooks directory if empty
@@ -478,7 +530,11 @@ if (args[0] === 'uninstall') {
   console.log('\nVibecraft hooks have been removed.')
   console.log('Your data is preserved in ~/.vibecraft/data/')
   console.log('\nTo remove all data:')
-  console.log('  rm -rf ~/.vibecraft')
+  if (IS_WINDOWS) {
+    console.log('  rmdir /s /q %USERPROFILE%\\.vibecraft')
+  } else {
+    console.log('  rm -rf ~/.vibecraft')
+  }
   console.log('\nRestart Claude Code for changes to take effect.\n')
 
   process.exit(0)
@@ -499,6 +555,12 @@ if (args[0] === 'doctor') {
   // -------------------------------------------------------------------------
   console.log('[1/6] Checking dependencies...')
 
+  // Platform info
+  if (IS_WINDOWS) {
+    console.log(`  ℹ Platform: Windows`)
+    console.log(`    Using PowerShell for hooks, ProcessSessionManager for sessions`)
+  }
+
   // Node version
   const nodeVersion = process.version
   const nodeMajor = parseInt(nodeVersion.slice(1).split('.')[0])
@@ -509,8 +571,10 @@ if (args[0] === 'doctor') {
     issues.push('Node.js 18+ required')
   }
 
-  // jq
-  if (checkJq()) {
+  // jq (not needed on Windows - PowerShell has ConvertFrom-Json)
+  if (IS_WINDOWS) {
+    console.log('  ✓ PowerShell (native JSON parsing)')
+  } else if (checkJq()) {
     try {
       const jqVersion = execSync('jq --version 2>&1', { encoding: 'utf-8' }).trim()
       console.log(`  ✓ jq (${jqVersion})`)
@@ -522,8 +586,10 @@ if (args[0] === 'doctor') {
     issues.push('jq not installed - hooks will not work')
   }
 
-  // tmux
-  if (checkTmux()) {
+  // tmux (not needed on Windows - uses ProcessSessionManager)
+  if (IS_WINDOWS) {
+    console.log('  ✓ ProcessSessionManager (native session management)')
+  } else if (checkTmux()) {
     try {
       const tmuxVersion = execSync('tmux -V 2>&1', { encoding: 'utf-8' }).trim()
       console.log(`  ✓ tmux (${tmuxVersion})`)
@@ -535,13 +601,17 @@ if (args[0] === 'doctor') {
     warnings.push('tmux not installed - browser prompt feature won\'t work')
   }
 
-  // curl
-  try {
-    execSync('which curl', { stdio: 'ignore' })
-    console.log('  ✓ curl')
-  } catch {
-    console.log('  ✗ curl not found')
-    issues.push('curl not installed - hooks cannot send events to server')
+  // curl (not needed on Windows - PowerShell has Invoke-WebRequest)
+  if (IS_WINDOWS) {
+    console.log('  ✓ PowerShell (Invoke-WebRequest)')
+  } else {
+    try {
+      execSync('which curl', { stdio: 'ignore' })
+      console.log('  ✓ curl')
+    } catch {
+      console.log('  ✗ curl not found')
+      issues.push('curl not installed - hooks cannot send events to server')
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -549,18 +619,21 @@ if (args[0] === 'doctor') {
   // -------------------------------------------------------------------------
   console.log('\n[2/6] Checking hook script...')
 
-  const hookScript = join(homedir(), '.vibecraft', 'hooks', 'vibecraft-hook.sh')
+  const hookScriptName = IS_WINDOWS ? 'vibecraft-hook.ps1' : 'vibecraft-hook.sh'
+  const hookScript = join(homedir(), '.vibecraft', 'hooks', hookScriptName)
   if (existsSync(hookScript)) {
     console.log(`  ✓ Hook script exists: ${hookScript}`)
 
-    // Check if executable
-    try {
-      const { accessSync, constants } = await import('fs')
-      accessSync(hookScript, constants.X_OK)
-      console.log('  ✓ Hook script is executable')
-    } catch {
-      console.log('  ✗ Hook script is not executable')
-      issues.push(`Hook script not executable. Run: chmod +x ${hookScript}`)
+    // Check if executable (Unix only)
+    if (!IS_WINDOWS) {
+      try {
+        const { accessSync, constants } = await import('fs')
+        accessSync(hookScript, constants.X_OK)
+        console.log('  ✓ Hook script is executable')
+      } catch {
+        console.log('  ✗ Hook script is not executable')
+        issues.push(`Hook script not executable. Run: chmod +x ${hookScript}`)
+      }
     }
   } else {
     console.log(`  ✗ Hook script not found: ${hookScript}`)
@@ -670,8 +743,11 @@ if (args[0] === 'doctor') {
   console.log('\n[5/6] Checking server status...')
 
   try {
-    const healthRes = execSync('curl -s http://localhost:4003/health', {
-      timeout: 3000,
+    const healthCmd = IS_WINDOWS
+      ? 'powershell -Command "(Invoke-WebRequest -Uri http://localhost:4003/health -UseBasicParsing -TimeoutSec 2).Content"'
+      : 'curl -s http://localhost:4003/health'
+    const healthRes = execSync(healthCmd, {
+      timeout: 5000,
       encoding: 'utf-8'
     })
     const health = JSON.parse(healthRes)
@@ -687,11 +763,15 @@ if (args[0] === 'doctor') {
   }
 
   // -------------------------------------------------------------------------
-  // 6. Check tmux sessions
+  // 6. Check sessions (tmux on Unix, ProcessSessionManager on Windows)
   // -------------------------------------------------------------------------
-  console.log('\n[6/6] Checking tmux sessions...')
+  console.log('\n[6/6] Checking sessions...')
 
-  if (checkTmux()) {
+  if (IS_WINDOWS) {
+    // On Windows, session management is done via ProcessSessionManager
+    // We can't easily check this from the CLI, so we just note it
+    console.log('  ℹ Sessions managed via ProcessSessionManager (check server for details)')
+  } else if (checkTmux()) {
     try {
       const sessions = execSync('tmux list-sessions 2>/dev/null', {
         encoding: 'utf-8',

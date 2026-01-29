@@ -64,12 +64,26 @@ export function setupDirectoryAutocomplete(
     }
 
     dd.innerHTML = results.map((path, i) => {
+      // Normalize path separators for display
+      const normalizedPath = path.replace(/\\/g, '/')
       // Extract display name (last component)
-      const name = path.replace(/\/+$/, '').split('/').pop() || path
-      // Shorten path for display
-      const shortPath = path.startsWith('/home/')
-        ? '~' + path.slice(path.indexOf('/', 6))
-        : path
+      const name = normalizedPath.replace(/\/+$/, '').split('/').pop() || path
+      // Shorten path for display (handle both Unix and Windows home paths)
+      let shortPath = normalizedPath
+      if (normalizedPath.startsWith('/home/')) {
+        // Unix: /home/user/... -> ~/...
+        shortPath = '~' + normalizedPath.slice(normalizedPath.indexOf('/', 6))
+      } else if (normalizedPath.startsWith('/Users/')) {
+        // macOS: /Users/user/... -> ~/...
+        shortPath = '~' + normalizedPath.slice(normalizedPath.indexOf('/', 7))
+      } else if (/^[A-Za-z]:\/Users\//i.test(normalizedPath)) {
+        // Windows: C:/Users/user/... -> ~/...
+        const userStart = normalizedPath.indexOf('/Users/') + 7
+        const userEnd = normalizedPath.indexOf('/', userStart)
+        if (userEnd > 0) {
+          shortPath = '~' + normalizedPath.slice(userEnd)
+        }
+      }
 
       return `
         <div class="dir-item${i === selectedIndex ? ' selected' : ''}" data-index="${i}">

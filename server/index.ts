@@ -38,6 +38,15 @@ import { DEFAULTS } from '../shared/defaults.js'
 import { GitStatusManager } from './GitStatusManager.js'
 import { ProjectsManager } from './ProjectsManager.js'
 import { fileURLToPath } from 'url'
+import {
+  IS_WINDOWS,
+  expandHome as platformExpandHome,
+  getExtendedPath,
+  HOME_DIR,
+  TEMP_DIR,
+  ENV_PATH_SEP,
+} from '../shared/platform.js'
+import { ProcessSessionManager } from './ProcessSessionManager.js'
 
 // ============================================================================
 // Version (read from package.json)
@@ -71,12 +80,9 @@ const VERSION = getPackageVersion()
 // Configuration (env vars override DEFAULTS from shared/defaults.ts)
 // ============================================================================
 
-/** Expand ~ to home directory in paths */
+/** Expand ~ to home directory in paths (use platform-aware version) */
 function expandHome(path: string): string {
-  if (path.startsWith('~/') || path === '~') {
-    return path.replace('~', process.env.HOME || '')
-  }
-  return path
+  return platformExpandHome(path)
 }
 
 const PORT = parseInt(process.env.VIBECRAFT_PORT ?? String(DEFAULTS.SERVER_PORT), 10)
@@ -97,17 +103,14 @@ const MAX_BODY_SIZE = 1024 * 1024
 /** How often to check for stale "working" sessions */
 const WORKING_CHECK_INTERVAL_MS = 10_000 // 10 seconds
 
-/** Extended PATH for exec() - includes Homebrew and user paths for macOS/Linux */
-const HOME = process.env.HOME || ''
-const EXEC_PATH = [
-  `${HOME}/.local/bin`,     // User local bin (Claude CLI default location)
-  '/opt/homebrew/bin',      // macOS Apple Silicon Homebrew
-  '/usr/local/bin',         // macOS Intel Homebrew / Linux local
-  process.env.PATH || '',
-].join(':')
+/** Extended PATH for exec() - platform-aware */
+const EXEC_PATH = getExtendedPath()
 
 /** Options for exec() with extended PATH */
 const EXEC_OPTIONS = { env: { ...process.env, PATH: EXEC_PATH } }
+
+/** Process-based session manager for Windows (where tmux is unavailable) */
+const processSessionManager = IS_WINDOWS ? new ProcessSessionManager() : null
 
 /** Deepgram API key from environment */
 const DEEPGRAM_API_KEY_ENV = 'DEEPGRAM_API_KEY'
@@ -221,13 +224,18 @@ function collectRequestBody(req: IncomingMessage, maxSize: number = MAX_BODY_SIZ
 /**
  * Safely send text to a tmux session using load-buffer + paste-buffer.
  * Uses execFile with proper arguments to prevent shell injection.
+ * On Windows, this is a no-op (use ProcessSessionManager instead).
  */
 async function sendToTmuxSafe(tmuxSession: string, text: string): Promise<void> {
+  if (IS_WINDOWS) {
+    throw new Error('tmux is not available on Windows. Use ProcessSessionManager for session management.')
+  }
+
   // Validate session name
   validateTmuxSession(tmuxSession)
 
   // Create temp file with cryptographically secure random name
-  const tempFile = `/tmp/vibecraft-prompt-${Date.now()}-${randomBytes(16).toString('hex')}.txt`
+  const tempFile = join(TEMP_DIR, `vibecraft-prompt-${Date.now()}-${randomBytes(16).toString('hex')}.txt`)
   writeFileSync(tempFile, text)
 
   try {
@@ -761,24 +769,70 @@ function shortId(): string {
 /**
  * Create a new managed session
  */
-function createSession(options: CreateSessionRequest = {}): Promise<ManagedSession> {
+async function createSession(options: CreateSessionRequest = {}): Promise<ManagedSession> {
+  const id = randomUUID()
+  sessionCounter++
+  const name = options.name || `Claude ${sessionCounter}`
+
+  // Validate cwd to prevent command injection
+  let cwd: string
+  try {
+    cwd = validateDirectoryPath(options.cwd || process.cwd())
+  } catch (err) {
+    throw err
+  }
+
+  // Build flags
+  const flags = options.flags || {}
+
+  // Windows: Use ProcessSessionManager
+  if (IS_WINDOWS && processSessionManager) {
+    try {
+      const procSession = await processSessionManager.createSession({
+        name,
+        cwd,
+        flags: {
+          continue: flags.continue !== false,
+          skipPermissions: flags.skipPermissions !== false,
+          chrome: flags.chrome,
+        },
+      })
+
+      const session: ManagedSession = {
+        id: procSession.id,
+        name: procSession.name,
+        tmuxSession: `process-${procSession.id.slice(0, 8)}`, // Placeholder for compatibility
+        status: procSession.status,
+        createdAt: procSession.createdAt,
+        lastActivity: procSession.lastActivity,
+        cwd: procSession.cwd,
+      }
+
+      managedSessions.set(session.id, session)
+      log(`Created session (Windows): ${name} (${session.id.slice(0, 8)})`)
+
+      // Track git status for this session
+      if (cwd) {
+        gitStatusManager.track(session.id, cwd)
+        projectsManager.addProject(cwd, name)
+      }
+
+      broadcastSessions()
+      saveSessions()
+
+      return session
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      log(`Failed to spawn session (Windows): ${msg}`)
+      throw new Error(`Failed to spawn session: ${msg}`)
+    }
+  }
+
+  // Unix: Use tmux
   return new Promise((resolve, reject) => {
-    const id = randomUUID()
-    sessionCounter++
-    const name = options.name || `Claude ${sessionCounter}`
     const tmuxSession = `vibecraft-${shortId()}`
 
-    // Validate cwd to prevent command injection
-    let cwd: string
-    try {
-      cwd = validateDirectoryPath(options.cwd || process.cwd())
-    } catch (err) {
-      reject(err)
-      return
-    }
-
     // Build claude command with flags
-    const flags = options.flags || {}
     const claudeArgs: string[] = []
 
     // Defaults: continue=true, skipPermissions=true, chrome=false
@@ -881,14 +935,33 @@ function updateSession(id: string, updates: UpdateSessionRequest): ManagedSessio
 /**
  * Delete/kill a session
  */
-function deleteSession(id: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const session = managedSessions.get(id)
-    if (!session) {
-      resolve(false)
-      return
+async function deleteSession(id: string): Promise<boolean> {
+  const session = managedSessions.get(id)
+  if (!session) {
+    return false
+  }
+
+  // Windows: Use ProcessSessionManager
+  if (IS_WINDOWS && processSessionManager) {
+    await processSessionManager.kill(id)
+
+    managedSessions.delete(id)
+    gitStatusManager.untrack(id)
+    // Clean up mapping
+    for (const [claudeId, managedId] of claudeToManagedMap) {
+      if (managedId === id) {
+        claudeToManagedMap.delete(claudeId)
+      }
     }
 
+    log(`Deleted session (Windows): ${session.name} (${id.slice(0, 8)})`)
+    broadcastSessions()
+    saveSessions()
+    return true
+  }
+
+  // Unix: Use tmux
+  return new Promise((resolve) => {
     // Kill the tmux session using execFile to prevent shell injection
     try {
       validateTmuxSession(session.tmuxSession)
@@ -930,6 +1003,18 @@ async function sendPromptToSession(id: string, prompt: string): Promise<{ ok: bo
   }
 
   try {
+    // Windows: Use ProcessSessionManager
+    if (IS_WINDOWS && processSessionManager) {
+      const success = processSessionManager.sendInput(id, prompt)
+      if (!success) {
+        return { ok: false, error: 'Failed to send input to session' }
+      }
+      session.lastActivity = Date.now()
+      log(`Prompt sent to ${session.name} (Windows): ${prompt.slice(0, 50)}...`)
+      return { ok: true }
+    }
+
+    // Unix: Use tmux
     await sendToTmuxSafe(session.tmuxSession, prompt)
     session.lastActivity = Date.now()
     log(`Prompt sent to ${session.name}: ${prompt.slice(0, 50)}...`)
@@ -942,9 +1027,36 @@ async function sendPromptToSession(id: string, prompt: string): Promise<{ ok: bo
 }
 
 /**
- * Check if tmux sessions are still alive and update status
+ * Check if sessions are still alive and update status
  */
 function checkSessionHealth(): void {
+  // Windows: Use ProcessSessionManager
+  if (IS_WINDOWS && processSessionManager) {
+    processSessionManager.checkHealth()
+    let changed = false
+
+    for (const session of managedSessions.values()) {
+      const procSession = processSessionManager.getSession(session.id)
+      if (procSession) {
+        const newStatus = procSession.status
+        if (session.status !== newStatus) {
+          session.status = newStatus
+          changed = true
+        }
+      } else if (session.status !== 'offline') {
+        session.status = 'offline'
+        changed = true
+      }
+    }
+
+    if (changed) {
+      broadcastSessions()
+      saveSessions()
+    }
+    return
+  }
+
+  // Unix: Use tmux
   exec('tmux list-sessions -F "#{session_name}"', EXEC_OPTIONS, (error, stdout) => {
     if (error) {
       // tmux might not be running
