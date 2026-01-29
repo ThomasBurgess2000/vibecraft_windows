@@ -30,13 +30,23 @@ $null = New-Item -ItemType Directory -Path $DataDir -Force -ErrorAction Silently
 # =============================================================================
 
 # Read JSON from stdin
-$input = [Console]::In.ReadToEnd()
+# NOTE: Do NOT use $input as variable name - it's a reserved PowerShell automatic variable
+$stdinContent = @($Input) -join "`n"
+
+# If $Input was empty, try Console.In (for piped input)
+if (-not $stdinContent) {
+    $stdinContent = [Console]::In.ReadToEnd()
+}
 
 # Parse the JSON
 try {
-    $data = $input | ConvertFrom-Json
+    $data = $stdinContent | ConvertFrom-Json
 } catch {
-    Write-Error "Failed to parse JSON input: $_"
+    # Log error for debugging
+    $errorLog = Join-Path $DataDir "hook-errors.log"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $errorLog -Value "[$timestamp] Failed to parse JSON: $_" -Encoding UTF8
+    Add-Content -Path $errorLog -Value "[$timestamp] Input was: $stdinContent" -Encoding UTF8
     exit 1
 }
 
