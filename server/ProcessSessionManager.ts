@@ -104,7 +104,12 @@ export class ProcessSessionManager extends EventEmitter {
       throw new Error('Claude CLI not found. Please ensure it is installed and in PATH.')
     }
 
+    console.log(`[ProcessSessionManager] Spawning Claude: ${claudePath} ${args.join(' ')}`)
+    console.log(`[ProcessSessionManager] CWD: ${cwd}`)
+
     // Spawn the process
+    // Note: Claude Code is a TUI app that ideally needs a PTY.
+    // Using shell: true to get better terminal compatibility on Windows.
     const proc = spawn(claudePath, args, {
       cwd,
       env: {
@@ -112,8 +117,8 @@ export class ProcessSessionManager extends EventEmitter {
         PATH: this.extendedPath,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
-      windowsHide: true,
+      shell: true,
+      windowsHide: false,
     })
 
     const session: ManagedProcess = {
@@ -144,6 +149,7 @@ export class ProcessSessionManager extends EventEmitter {
 
     // Handle process exit
     proc.on('exit', (code) => {
+      console.log(`[ProcessSessionManager] Process exited with code: ${code}`)
       session.status = 'offline'
       this.emit('exit', id, code)
       this.emit('statusChange', id, 'offline')
@@ -151,10 +157,14 @@ export class ProcessSessionManager extends EventEmitter {
 
     // Handle errors
     proc.on('error', (error) => {
+      console.error(`[ProcessSessionManager] Process error:`, error)
       session.status = 'offline'
       this.emit('error', id, error)
       this.emit('statusChange', id, 'offline')
     })
+
+    // Log spawn success
+    console.log(`[ProcessSessionManager] Process spawned with PID: ${proc.pid}`)
 
     this.sessions.set(id, session)
     console.log(`[ProcessSessionManager] Created session: ${name} (${id.slice(0, 8)})`)
